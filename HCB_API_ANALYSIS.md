@@ -232,10 +232,78 @@ protect_from_forgery except: :webhook
 **Mitigation**: Signature verification is implemented for Stripe webhooks
 
 #### 3. Admin Endpoint Exposure
-**Location**: Various admin endpoints
-**Issue**: Admin functionality accessible if authentication bypassed
-**Risk**: Complete system compromise
-**Current Protection**: AdminConstraint and AuditorConstraint
+**Location**: Various admin endpoints protected by AdminConstraint
+**Issue**: Over 100 admin endpoints with high-privilege operations accessible if authentication bypassed
+**Risk**: Complete system compromise, financial fraud, data breach
+
+**Specific High-Risk Endpoints:**
+```ruby
+# Financial Operations (POST/PUT requests)
+POST /admin/:id/ach_approve              # Approve bank transfers
+POST /admin/:id/ach_reject               # Reject bank transfers  
+POST /admin/:id/ach_send_realtime        # Send real-time ACH transfers
+POST /admin/:id/disbursement_approve     # Approve disbursements
+POST /admin/:id/disbursement_reject      # Reject disbursements
+POST /admin/raw_transaction_create       # Create arbitrary transactions
+POST /admin/raw_intrafi_transactions_import # Import bulk transactions
+PUT  /admin/:id/event_toggle_approved    # Approve/reject organizations
+PUT  /admin/:id/event_reject             # Reject organizations
+
+# Sensitive Data Access (GET requests)
+GET /admin/users                         # Access all user PII
+GET /admin/stripe_cards                  # View all card details  
+GET /admin/bank_accounts                 # View all bank account info
+GET /admin/raw_transactions              # View all financial transactions
+GET /admin/balances                      # View all organization balances
+```
+
+**Admin Interface Exposure:**
+```ruby
+# config/routes.rb lines 11-19
+constraints AdminConstraint do
+  mount Audits1984::Engine => "/console"     # Audit log interface
+  mount Sidekiq::Web => "/sidekiq"           # Job queue management
+  mount Flipper::UI.app(Flipper), at: "flipper" # Feature flags
+end
+constraints AuditorConstraint do  
+  mount Blazer::Engine, at: "blazer"         # Database query interface
+  mount SchemaEndpoint.instance => "/schema" # Schema access
+end
+```
+
+**Current Protection Mechanisms:**
+```ruby
+# lib/admin_constraint.rb lines 7-19
+def self.matches?(request)
+  cookies = ActionDispatch::Cookies::CookieJar.build(request, request.cookies)
+  session_token = cookies.encrypted[:session_token]
+  return false unless session_token.present?
+  
+  potential_session = UserSession.find_by(session_token:)
+  if potential_session
+    return potential_session.user&.admin?
+  end
+  false
+end
+
+# app/helpers/sessions_helper.rb lines 143-147  
+def signed_in_admin
+  unless auditor_signed_in?
+    redirect_to auth_users_path(require_reload: true), 
+                flash: { error: "You'll need to sign in as an admin." }
+  end
+end
+
+# app/controllers/admin_controller.rb lines 4-5
+skip_after_action :verify_authorized # Bypasses Pundit policies
+before_action :signed_in_admin
+```
+
+**Vulnerability Details:**
+1. **Session Hijacking Impact**: Compromised admin session tokens provide immediate access to financial operations
+2. **Authorization Bypass**: AdminController skips Pundit authorization, relying solely on role-based checks
+3. **Broad Admin Privileges**: Binary admin status grants access to all admin functions without granular permissions
+4. **Financial Operation Risk**: Direct access to approve/reject financial transfers without additional verification
 
 ### 🟡 MEDIUM SEVERITY
 
